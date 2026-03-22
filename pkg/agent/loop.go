@@ -2201,6 +2201,7 @@ turnLoop:
 						toolArgs = toolReq.Arguments
 					}
 				case HookActionDenyTool:
+					allResponsesHandled = false
 					denyContent := hookDeniedToolContent("Tool execution denied by hook", decision.Reason)
 					al.emitEvent(
 						EventKindToolExecSkipped,
@@ -2240,6 +2241,7 @@ turnLoop:
 					ChatID:    ts.chatID,
 				})
 				if !approval.Approved {
+					allResponsesHandled = false
 					denyContent := hookDeniedToolContent("Tool execution denied by approval hook", approval.Reason)
 					al.emitEvent(
 						EventKindToolExecSkipped,
