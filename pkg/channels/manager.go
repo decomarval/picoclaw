@@ -699,7 +699,8 @@ func newChannelWorker(name string, ch Channel) *channelWorker {
 // runWorker processes outbound messages for a single channel.
 // Message processing follows this order:
 //  1. SplitByMarker (if enabled in config) - LLM semantic marker-based splitting
-//  2. SplitMessage - channel-specific length-based splitting (MaxMessageLength)
+//  2. MessageSplitter.SplitContent (if channel implements it) - channel-specific structural splitting
+//  3. SplitMessage - length-based splitting (MaxMessageLength) as fallback
 func (m *Manager) runWorker(ctx context.Context, name string, w *channelWorker) {
 	defer close(w.done)
 	for {
@@ -708,26 +709,32 @@ func (m *Manager) runWorker(ctx context.Context, name string, w *channelWorker) 
 			if !ok {
 				return
 			}
-			maxLen := 0
-			if mlp, ok := w.ch.(MessageLengthProvider); ok {
-				maxLen = mlp.MaxMessageLength()
-			}
-
-			// Collect all message chunks to send
-			var chunks []string
 
 			// Step 1: Try marker-based splitting if enabled
+			var markerChunks []string
 			if m.config != nil && m.config.Agents.Defaults.SplitOnMarker {
-				if markerChunks := SplitByMarker(msg.Content); len(markerChunks) > 1 {
-					for _, chunk := range markerChunks {
-						chunks = append(chunks, splitByLength(chunk, maxLen)...)
-					}
+				if mc := SplitByMarker(msg.Content); len(mc) > 1 {
+					markerChunks = mc
 				}
 			}
+			if len(markerChunks) == 0 {
+				markerChunks = []string{msg.Content}
+			}
 
-			// Step 2: Fallback to length-based splitting if no chunks from marker
-			if len(chunks) == 0 {
-				chunks = splitByLength(msg.Content, maxLen)
+			// Step 2: Apply channel-specific splitting or length-based splitting
+			var chunks []string
+			if splitter, ok := w.ch.(MessageSplitter); ok {
+				for _, chunk := range markerChunks {
+					chunks = append(chunks, splitter.SplitContent(chunk)...)
+				}
+			} else {
+				maxLen := 0
+				if mlp, ok := w.ch.(MessageLengthProvider); ok {
+					maxLen = mlp.MaxMessageLength()
+				}
+				for _, chunk := range markerChunks {
+					chunks = append(chunks, splitByLength(chunk, maxLen)...)
+				}
 			}
 
 			// Step 3: Send all chunks
@@ -1198,12 +1205,18 @@ func (m *Manager) SendMessage(ctx context.Context, msg bus.OutboundMessage) erro
 		return fmt.Errorf("channel %s has no active worker", msg.Channel)
 	}
 
-	maxLen := 0
-	if mlp, ok := w.ch.(MessageLengthProvider); ok {
-		maxLen = mlp.MaxMessageLength()
+	var chunks []string
+	if splitter, ok := w.ch.(MessageSplitter); ok {
+		chunks = splitter.SplitContent(msg.Content)
+	} else {
+		maxLen := 0
+		if mlp, ok := w.ch.(MessageLengthProvider); ok {
+			maxLen = mlp.MaxMessageLength()
+		}
+		chunks = splitByLength(msg.Content, maxLen)
 	}
-	if maxLen > 0 && len([]rune(msg.Content)) > maxLen {
-		for _, chunk := range SplitMessage(msg.Content, maxLen) {
+	if len(chunks) > 1 {
+		for _, chunk := range chunks {
 			chunkMsg := msg
 			chunkMsg.Content = chunk
 			m.sendWithRetry(ctx, msg.Channel, w, chunkMsg)

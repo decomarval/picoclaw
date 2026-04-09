@@ -4,6 +4,184 @@ import (
 	"strings"
 )
 
+// segment represents a structural piece of content: either a table block or a text block.
+type segment struct {
+	content  string
+	hasTable bool
+}
+
+// isTableSeparatorLine returns true if the line is a markdown table separator row,
+// e.g. "| --- | :---: | ---: |".
+func isTableSeparatorLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "|") {
+		return false
+	}
+	cells := strings.Split(trimmed, "|")
+	// Leading "|" produces an empty first element; skip it.
+	// Trailing "|" is optional in GFM; if present it produces an empty last element.
+	cells = cells[1:]
+	if len(cells) > 0 && strings.TrimSpace(cells[len(cells)-1]) == "" {
+		cells = cells[:len(cells)-1]
+	}
+	if len(cells) == 0 {
+		return false
+	}
+	for _, cell := range cells {
+		cell = strings.TrimSpace(cell)
+		if cell == "" || !strings.ContainsRune(cell, '-') {
+			return false
+		}
+		for _, ch := range cell {
+			if ch != '-' && ch != ':' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// CountMarkdownTables counts the number of markdown tables in content.
+// A table is identified by a separator line (e.g. "| --- | --- |") that is
+// NOT inside a fenced code block.
+func CountMarkdownTables(content string) int {
+	count := 0
+	inCodeBlock := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeBlock = !inCodeBlock
+			continue
+		}
+		if !inCodeBlock && isTableSeparatorLine(line) {
+			count++
+		}
+	}
+	return count
+}
+
+// segmentContent splits content into structural segments (table blocks and text blocks).
+// A table block is a contiguous run of lines starting with "|" that contains at least
+// one separator line. Lines between table blocks form text segments.
+// The concatenation of all segment contents equals the original content.
+func segmentContent(content string) []segment {
+	if content == "" {
+		return nil
+	}
+
+	lines := strings.Split(content, "\n")
+	var segments []segment
+	chunkStart := 0
+	inTableBlock := false
+	hasSeparator := false
+
+	flush := func(end int, asTable bool) {
+		if end <= chunkStart {
+			return
+		}
+		seg := strings.Join(lines[chunkStart:end], "\n")
+		if end < len(lines) {
+			seg += "\n"
+		}
+		segments = append(segments, segment{
+			content:  seg,
+			hasTable: asTable,
+		})
+		chunkStart = end
+	}
+
+	for i, line := range lines {
+		isTableLine := strings.HasPrefix(strings.TrimSpace(line), "|")
+
+		if isTableLine {
+			if !inTableBlock {
+				flush(i, false)
+				inTableBlock = true
+				hasSeparator = false
+			}
+			if isTableSeparatorLine(line) {
+				hasSeparator = true
+			}
+		} else if inTableBlock {
+			flush(i, hasSeparator)
+			inTableBlock = false
+			hasSeparator = false
+		}
+	}
+
+	flush(len(lines), inTableBlock && hasSeparator)
+	return segments
+}
+
+// SplitGreedy splits content into chunks where each chunk satisfies the fits predicate.
+// It greedily maximizes chunk length by accumulating structural segments (tables and text
+// blocks) until adding the next segment would violate the predicate. When a single text
+// segment is too large to fit, it falls back to line-level splitting.
+// Returns nil for empty content.
+func SplitGreedy(content string, fits func(string) bool) []string {
+	if content == "" {
+		return nil
+	}
+	if fits(content) {
+		return []string{content}
+	}
+
+	segments := segmentContent(content)
+	var result []string
+	var current strings.Builder
+
+	flush := func() {
+		if s := strings.TrimSpace(current.String()); s != "" {
+			result = append(result, s)
+		}
+		current.Reset()
+	}
+
+	for _, seg := range segments {
+		candidate := current.String() + seg.content
+		if current.Len() > 0 && !fits(strings.TrimSpace(candidate)) {
+			flush()
+			candidate = seg.content
+		}
+
+		if !fits(strings.TrimSpace(candidate)) {
+			// Single segment too large — split by lines
+			for _, line := range strings.SplitAfter(seg.content, "\n") {
+				if line == "" {
+					continue
+				}
+				if current.Len() > 0 && !fits(strings.TrimSpace(current.String()+line)) {
+					flush()
+				}
+				// Single line still too large — split by runes
+				if current.Len() == 0 && !fits(strings.TrimSpace(line)) {
+					lineRunes := []rune(line)
+					for len(lineRunes) > 0 {
+						lo, hi := 1, len(lineRunes)
+						for lo < hi {
+							mid := (lo + hi + 1) / 2
+							if fits(strings.TrimSpace(string(lineRunes[:mid]))) {
+								lo = mid
+							} else {
+								hi = mid - 1
+							}
+						}
+						result = append(result, strings.TrimSpace(string(lineRunes[:lo])))
+						lineRunes = lineRunes[lo:]
+					}
+					continue
+				}
+				current.WriteString(line)
+			}
+		} else {
+			current.WriteString(seg.content)
+		}
+	}
+
+	flush()
+	return result
+}
+
 // SplitMessage splits long messages into chunks, preserving code block integrity.
 // The maxLen parameter is measured in runes (Unicode characters), not bytes.
 // The function reserves a buffer (10% of maxLen, min 50) to leave room for closing code blocks,

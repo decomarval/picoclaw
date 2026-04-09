@@ -82,6 +82,15 @@ type MessageLengthProvider interface {
 	MaxMessageLength() int
 }
 
+// MessageSplitter is an opt-in interface for channels that require custom
+// pre-send splitting logic (e.g. Feishu's 5-table-per-card limit).
+// When a channel implements this interface, the Manager calls SplitContent
+// instead of the default length-based splitting. The implementation controls
+// all splitting constraints via the fits callback passed to SplitGreedy.
+type MessageSplitter interface {
+	SplitContent(content string) []string
+}
+
 type BaseChannel struct {
 	config              any
 	bus                 *bus.MessageBus

@@ -136,6 +136,22 @@ func (c *FeishuChannel) Stop(ctx context.Context) error {
 	return nil
 }
 
+// feishuMaxTablesPerCard is the maximum number of markdown tables allowed in a
+// single Feishu Interactive Card JSON 2.0 message. Exceeding this triggers error 11310.
+const feishuMaxTablesPerCard = 5
+
+// Compile-time assertion: FeishuChannel implements channels.MessageSplitter.
+var _ channels.MessageSplitter = (*FeishuChannel)(nil)
+
+// SplitContent implements channels.MessageSplitter.
+// It splits content so that each chunk has at most 5 markdown tables,
+// satisfying the Feishu Interactive Card limit.
+func (c *FeishuChannel) SplitContent(content string) []string {
+	return channels.SplitGreedy(content, func(chunk string) bool {
+		return channels.CountMarkdownTables(chunk) <= feishuMaxTablesPerCard
+	})
+}
+
 // Send sends a message using Interactive Card format for markdown rendering.
 // Falls back to plain text message if card sending fails (e.g., table limit exceeded).
 func (c *FeishuChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]string, error) {
